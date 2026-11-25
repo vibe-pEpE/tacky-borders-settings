@@ -6,7 +6,7 @@ mod preview;
 mod yaml_edit;
 
 use eframe::egui;
-use model::{ColorSetting, Offset, Radius, Settings};
+use model::{Anim, AnimList, AnimSet, ColorSetting, Offset, Radius, Settings};
 use std::path::PathBuf;
 
 fn config_path() -> Option<PathBuf> {
@@ -34,6 +34,8 @@ struct App {
     edit: Settings,
     status: Status,
     load_error: Option<String>,
+    /// Which theme the preview shows (only matters for dark/light colors)
+    preview_dark: bool,
 }
 
 impl App {
@@ -45,6 +47,7 @@ impl App {
             edit: Settings::from_yaml("").unwrap(),
             status: Status::None,
             load_error: None,
+            preview_dark: true,
         };
         app.reload();
         app
@@ -146,24 +149,28 @@ fn color_button(ui: &mut egui::Ui, rgba: &mut model::Rgba) {
     }
 }
 
-fn color_editor(ui: &mut egui::Ui, id: &str, c: &mut ColorSetting) {
+fn color_editor(ui: &mut egui::Ui, id: &str, c: &mut ColorSetting, allow_theme: bool) {
+    const THEME: &str = "Different for dark / light theme";
     let mode = match c {
         ColorSetting::Accent => "Windows accent color",
         ColorSetting::Solid(_) => "Single color",
         ColorSetting::Gradient { .. } => "Gradient",
+        ColorSetting::ThemeAware { .. } => THEME,
         ColorSetting::Advanced(_) => "Advanced (kept as is)",
     };
     egui::ComboBox::from_id_salt(id)
         .selected_text(mode)
-        .width(190.0)
+        .width(240.0)
         .show_ui(ui, |ui| {
             let current = c.clone();
-            let base = match &current {
+            // When switching modes, start from the colors already chosen.
+            let shown = current.for_theme(true).clone();
+            let base = match &shown {
                 ColorSetting::Solid(x) => *x,
                 ColorSetting::Gradient { from, .. } => *from,
                 _ => [0x62, 0x74, 0xe7, 255],
             };
-            let to = match &current {
+            let to = match &shown {
                 ColorSetting::Gradient { to, .. } => *to,
                 _ => [0x87, 0x52, 0xa3, 255],
             };
@@ -186,6 +193,22 @@ fn color_editor(ui: &mut egui::Ui, id: &str, c: &mut ColorSetting) {
                 && !matches!(current, ColorSetting::Gradient { .. })
             {
                 *c = ColorSetting::Gradient { from: base, to, angle: 45.0 };
+            }
+            if allow_theme
+                && ui
+                    .selectable_label(matches!(current, ColorSetting::ThemeAware { .. }), THEME)
+                    .on_hover_text("Borders switch automatically when Windows changes between dark and light mode.")
+                    .clicked()
+                && !matches!(current, ColorSetting::ThemeAware { .. })
+            {
+                let start = match current {
+                    ColorSetting::Advanced(_) => ColorSetting::Solid(base),
+                    other => other,
+                };
+                *c = ColorSetting::ThemeAware {
+                    dark: Box::new(start.clone()),
+                    light: Box::new(start),
+                };
             }
         });
 
@@ -211,10 +234,19 @@ fn color_editor(ui: &mut egui::Ui, id: &str, c: &mut ColorSetting) {
             });
             ui.add(egui::Slider::new(angle, -180.0..=180.0).text("angle °").step_by(1.0));
         }
+        ColorSetting::ThemeAware { dark, light } => {
+            ui.indent(format!("{id}-theme"), |ui| {
+                ui.label(egui::RichText::new("🌙 Dark theme").strong());
+                color_editor(ui, &format!("{id}-dark"), dark, false);
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("☀ Light theme").strong());
+                color_editor(ui, &format!("{id}-light"), light, false);
+            });
+        }
         ColorSetting::Advanced(yaml) => {
             ui.label(
-                "This color uses a format this app can't edit yet (for example separate \
-                 dark/light theme colors). It will be left exactly as it is, unless you \
+                "This color uses a format this app can't edit yet (for example a gradient \
+                 with more than two colors). It will be left exactly as it is, unless you \
                  pick another option above.",
             );
             ui.add(
@@ -224,6 +256,84 @@ fn color_editor(ui: &mut egui::Ui, id: &str, c: &mut ColorSetting) {
             );
         }
     }
+}
+
+fn anim_editor(ui: &mut egui::Ui, id: &str, list: &mut AnimList) {
+    let set = match list {
+        AnimList::Simple(set) => set,
+        AnimList::Advanced(yaml) => {
+            ui.label(
+                "These animations use settings this app can't edit yet (for example a custom \
+                 easing curve). They are left exactly as they are.",
+            );
+            ui.add(
+                egui::TextEdit::multiline(&mut yaml.as_str())
+                    .code_editor()
+                    .desired_rows(3),
+            );
+            if ui.small_button("Replace with simple settings").clicked() {
+                *list = AnimList::Simple(AnimSet {
+                    spiral: Anim { on: false, duration: 1800.0, easing: "Linear".into() },
+                    reverse: false,
+                    fade: Anim { on: true, duration: 200.0, easing: "EaseInOutQuad".into() },
+                });
+            }
+            return;
+        }
+    };
+
+    let easing_box = |ui: &mut egui::Ui, salt: String, easing: &mut String| {
+        egui::ComboBox::from_id_salt(salt)
+            .selected_text(easing.as_str())
+            .width(150.0)
+            .height(300.0)
+            .show_ui(ui, |ui| {
+                for e in model::EASINGS {
+                    ui.selectable_value(easing, e.to_string(), e);
+                }
+            })
+            .response
+            .on_hover_text("How the animation speeds up / slows down.");
+    };
+
+    egui::Grid::new(format!("{id}-grid"))
+        .num_columns(4)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.checkbox(&mut set.spiral.on, "Spiral")
+                .on_hover_text("A light runs around the border.");
+            ui.add_enabled_ui(set.spiral.on, |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut set.spiral.duration)
+                        .range(50.0..=10000.0)
+                        .speed(10.0)
+                        .suffix(" ms"),
+                )
+                .on_hover_text("How long one round takes. Drag or double-click to type.");
+            });
+            ui.add_enabled_ui(set.spiral.on, |ui| {
+                easing_box(ui, format!("{id}-spiral-easing"), &mut set.spiral.easing);
+            });
+            ui.add_enabled_ui(set.spiral.on, |ui| {
+                ui.checkbox(&mut set.reverse, "Reverse");
+            });
+            ui.end_row();
+
+            ui.checkbox(&mut set.fade.on, "Fade")
+                .on_hover_text("The border fades in/out when focus changes.");
+            ui.add_enabled_ui(set.fade.on, |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut set.fade.duration)
+                        .range(10.0..=5000.0)
+                        .speed(5.0)
+                        .suffix(" ms"),
+                );
+            });
+            ui.add_enabled_ui(set.fade.on, |ui| {
+                easing_box(ui, format!("{id}-fade-easing"), &mut set.fade.easing);
+            });
+            ui.end_row();
+        });
 }
 
 impl eframe::App for App {
@@ -277,8 +387,18 @@ impl eframe::App for App {
             }
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("Preview");
-                preview::draw(ui, &self.edit);
+                let theme_aware = [&self.edit.active_color, &self.edit.inactive_color]
+                    .iter()
+                    .any(|c| matches!(c, ColorSetting::ThemeAware { .. }));
+                ui.horizontal(|ui| {
+                    ui.heading("Preview");
+                    if theme_aware {
+                        ui.add_space(12.0);
+                        ui.selectable_value(&mut self.preview_dark, true, "🌙 Dark");
+                        ui.selectable_value(&mut self.preview_dark, false, "☀ Light");
+                    }
+                });
+                preview::draw(ui, &self.edit, self.preview_dark || !theme_aware);
                 ui.add_space(8.0);
 
                 ui.heading("Border");
@@ -349,17 +469,33 @@ impl eframe::App for App {
 
                 ui.add_space(8.0);
                 ui.heading("Active window color");
-                color_editor(ui, "active", &mut self.edit.active_color);
+                color_editor(ui, "active", &mut self.edit.active_color, true);
 
                 ui.add_space(8.0);
                 ui.heading("Inactive window color");
-                color_editor(ui, "inactive", &mut self.edit.inactive_color);
+                color_editor(ui, "inactive", &mut self.edit.inactive_color, true);
 
                 ui.add_space(8.0);
-                ui.heading("Extras");
-                ui.checkbox(&mut self.edit.animations_enabled, "Animations")
-                    .on_hover_text("Spiral / fade animations as defined in the config.");
-                ui.checkbox(&mut self.edit.effects_enabled, "Effects (shadow / glow)")
+                ui.heading("Animations");
+                ui.checkbox(&mut self.edit.animations_enabled, "Enable animations");
+                ui.add_enabled_ui(self.edit.animations_enabled, |ui| {
+                    ui.label(egui::RichText::new("Active window").strong());
+                    anim_editor(ui, "anim-active", &mut self.edit.animations_active);
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Inactive window").strong());
+                    anim_editor(ui, "anim-inactive", &mut self.edit.animations_inactive);
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::Slider::new(&mut self.edit.animations_fps, 10..=240)
+                            .text("frames per second"),
+                    )
+                    .on_hover_text("Higher = smoother, but uses more CPU/GPU.");
+                    ui.small("Spiral animations may be heavy on low-end PCs.");
+                });
+
+                ui.add_space(8.0);
+                ui.heading("Effects");
+                ui.checkbox(&mut self.edit.effects_enabled, "Shadow / glow")
                     .on_hover_text("Needs rendering_backend: V2. May use more CPU/GPU.");
 
                 ui.add_space(10.0);

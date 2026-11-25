@@ -7,13 +7,15 @@ A small settings window for [tacky-borders](https://github.com/luke-you/tacky-bo
 - Live preview of active and inactive borders
 - Border width, offset and corner style
 - Active and inactive colors: Windows accent, a single color, or a two-color gradient with an angle
-- Turn animations and effects (shadow/glow) on or off
+- Separate colors for dark and light Windows theme
+- Animations: spiral (normal or reverse) and fade, with duration, easing and frame rate
+- Turn effects (shadow/glow) on or off
 
 ## Safe editing
 
 - Only the settings you change are rewritten. Comments, window rules and every other option in your `config.yaml` stay exactly as they were.
 - Before the first save, a backup is written to `config.yaml.bak`.
-- Settings this app can't edit yet, such as theme-aware dark/light colors, are left untouched.
+- Settings this app can't edit yet, such as gradients with more than two colors or custom easing curves, are left untouched.
 
 tacky-borders reloads the config on its own (`watch_config_changes: True`), so changes show up as soon as you click **Save**.
 

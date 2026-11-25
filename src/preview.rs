@@ -48,8 +48,10 @@ fn color_fn(c: &ColorSetting, bounds: Rect) -> Box<dyn Fn(Pos2) -> Color32> {
                 lerp(from, to, t)
             })
         }
-        // Can't render the advanced formats faithfully; show a neutral gray.
-        ColorSetting::Advanced(_) => Box::new(|_| Color32::from_gray(140)),
+        // Resolved by the caller via for_theme(); can't render advanced formats faithfully.
+        ColorSetting::ThemeAware { .. } | ColorSetting::Advanced(_) => {
+            Box::new(|_| Color32::from_gray(140))
+        }
     }
 }
 
@@ -81,8 +83,9 @@ fn border_shape(window: Rect, s: &Settings, color: &ColorSetting) -> Shape {
     Shape::mesh(mesh)
 }
 
-fn mock_window(painter: &egui::Painter, rect: Rect, radius: f32, title: &str, active: bool) {
-    let bg = if active { Color32::from_gray(38) } else { Color32::from_gray(30) };
+fn mock_window(painter: &egui::Painter, rect: Rect, radius: f32, title: &str, active: bool, dark: bool) {
+    let g = |d: u8, l: u8| Color32::from_gray(if dark { d } else { l });
+    let bg = if active { g(38, 250) } else { g(30, 236) };
     painter.rect_filled(rect, radius, bg);
     let bar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 26.0));
     painter.text(
@@ -90,7 +93,7 @@ fn mock_window(painter: &egui::Painter, rect: Rect, radius: f32, title: &str, ac
         egui::Align2::LEFT_CENTER,
         title,
         egui::FontId::proportional(12.0),
-        Color32::from_gray(if active { 220 } else { 130 }),
+        if active { g(220, 30) } else { g(130, 120) },
     );
     for (i, line) in [0.8, 0.6, 0.7].iter().enumerate() {
         let y = rect.top() + 44.0 + i as f32 * 16.0;
@@ -98,15 +101,16 @@ fn mock_window(painter: &egui::Painter, rect: Rect, radius: f32, title: &str, ac
             Pos2::new(rect.left() + 12.0, y),
             Vec2::new((rect.width() - 24.0) * line, 6.0),
         );
-        painter.rect_filled(line_rect, 3.0, Color32::from_gray(if active { 70 } else { 50 }));
+        painter.rect_filled(line_rect, 3.0, if active { g(70, 205) } else { g(50, 215) });
     }
 }
 
-pub fn draw(ui: &mut egui::Ui, s: &Settings) {
+pub fn draw(ui: &mut egui::Ui, s: &Settings, dark: bool) {
     let size = Vec2::new(ui.available_width().min(480.0), 200.0);
     let (resp, painter) = ui.allocate_painter(size, Sense::hover());
     let area = resp.rect;
-    painter.rect_filled(area, 6.0, Color32::from_rgb(24, 26, 38));
+    let desktop = if dark { Color32::from_rgb(24, 26, 38) } else { Color32::from_rgb(196, 208, 228) };
+    painter.rect_filled(area, 6.0, desktop);
 
     let r = s.border_radius.preview_px();
     let win = Vec2::new(area.width() * 0.48, 120.0);
@@ -115,8 +119,8 @@ pub fn draw(ui: &mut egui::Ui, s: &Settings) {
     let front = Rect::from_min_size(area.min + Vec2::new(area.width() * 0.40, 56.0), win);
 
     let painter = painter.with_clip_rect(area);
-    mock_window(&painter, back, r, "Inactive window", false);
-    painter.add(border_shape(back, s, &s.inactive_color));
-    mock_window(&painter, front, r, "Active window", true);
-    painter.add(border_shape(front, s, &s.active_color));
+    mock_window(&painter, back, r, "Inactive window", false, dark);
+    painter.add(border_shape(back, s, s.inactive_color.for_theme(dark)));
+    mock_window(&painter, front, r, "Active window", true, dark);
+    painter.add(border_shape(front, s, s.active_color.for_theme(dark)));
 }

@@ -50,6 +50,8 @@ pub enum ColorSetting {
     Accent,
     Solid(Rgba),
     Gradient { from: Rgba, to: Rgba, angle: f32 },
+    /// Different colors for dark and light Windows theme
+    ThemeAware { dark: Box<ColorSetting>, light: Box<ColorSetting> },
     /// A format this app can't edit yet (theme-aware, 3+ colors, ...). Left untouched.
     Advanced(String),
 }
@@ -65,6 +67,18 @@ impl ColorSetting {
                 Some(c) => ColorSetting::Solid(c),
                 None => ColorSetting::Advanced(describe(v)),
             },
+            Value::Mapping(m) if m.contains_key("dark") && m.contains_key("light") && m.len() == 2 => {
+                let dark = Self::from_yaml(m.get("dark"));
+                let light = Self::from_yaml(m.get("light"));
+                let simple = |c: &ColorSetting| {
+                    !matches!(c, ColorSetting::ThemeAware { .. } | ColorSetting::Advanced(_))
+                };
+                if simple(&dark) && simple(&light) {
+                    ColorSetting::ThemeAware { dark: Box::new(dark), light: Box::new(light) }
+                } else {
+                    ColorSetting::Advanced(describe(v))
+                }
+            }
             Value::Mapping(m) => {
                 let colors = m.get("colors").and_then(|c| c.as_sequence());
                 let dir = m.get("direction");
@@ -97,8 +111,142 @@ impl ColorSetting {
                 format!("colors: [\"{}\", \"{}\"]", to_hex(*from), to_hex(*to)),
                 format!("direction: {}deg", fmt_num(angle.round())),
             ])),
+            ColorSetting::ThemeAware { dark, light } => {
+                let mut lines = Vec::new();
+                for (key, c) in [("dark", dark), ("light", light)] {
+                    match c.to_yaml()? {
+                        NewValue::Inline(v) => lines.push(format!("{key}: {v}")),
+                        NewValue::Block(children) => {
+                            lines.push(format!("{key}:"));
+                            lines.extend(children.into_iter().map(|c| format!("  {c}")));
+                        }
+                    }
+                }
+                Some(NewValue::Block(lines))
+            }
             ColorSetting::Advanced(_) => None,
         }
+    }
+
+    /// The color to show for the given theme.
+    pub fn for_theme(&self, dark_theme: bool) -> &ColorSetting {
+        match self {
+            ColorSetting::ThemeAware { dark, light } => {
+                if dark_theme { dark } else { light }
+            }
+            other => other,
+        }
+    }
+}
+
+pub const EASINGS: [&str; 28] = [
+    "Linear",
+    "EaseIn", "EaseInSine", "EaseInQuad", "EaseInCubic", "EaseInQuart", "EaseInQuint",
+    "EaseInExpo", "EaseInCirc", "EaseInBack",
+    "EaseOut", "EaseOutSine", "EaseOutQuad", "EaseOutCubic", "EaseOutQuart", "EaseOutQuint",
+    "EaseOutExpo", "EaseOutCirc", "EaseOutBack",
+    "EaseInOut", "EaseInOutSine", "EaseInOutQuad", "EaseInOutCubic", "EaseInOutQuart",
+    "EaseInOutQuint", "EaseInOutExpo", "EaseInOutCirc", "EaseInOutBack",
+];
+
+#[derive(Clone, Debug)]
+pub struct Anim {
+    pub on: bool,
+    /// milliseconds
+    pub duration: f32,
+    pub easing: String,
+}
+
+/// Settings of a turned-off animation aren't saved, so they don't count as a difference.
+impl PartialEq for Anim {
+    fn eq(&self, o: &Self) -> bool {
+        self.on == o.on && (!self.on || (self.duration == o.duration && self.easing == o.easing))
+    }
+}
+
+/// Animations for one window state (active or inactive).
+#[derive(Clone, Debug)]
+pub struct AnimSet {
+    pub spiral: Anim,
+    /// Spiral runs the other way (ReverseSpiral)
+    pub reverse: bool,
+    pub fade: Anim,
+}
+
+impl PartialEq for AnimSet {
+    fn eq(&self, o: &Self) -> bool {
+        self.spiral == o.spiral
+            && self.fade == o.fade
+            && (!self.spiral.on || self.reverse == o.reverse)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AnimList {
+    Simple(AnimSet),
+    /// Something this app can't edit (custom bezier easing, duplicates...). Left untouched.
+    Advanced(String),
+}
+
+impl AnimList {
+    fn from_yaml(v: Option<&Value>) -> Self {
+        let mut set = AnimSet {
+            spiral: Anim { on: false, duration: 1800.0, easing: "Linear".into() },
+            reverse: false,
+            fade: Anim { on: false, duration: 200.0, easing: "Linear".into() },
+        };
+        let Some(v) = v else { return AnimList::Simple(set) };
+        let Some(items) = v.as_sequence() else {
+            return if v.is_null() { AnimList::Simple(set) } else { AnimList::Advanced(describe(v)) };
+        };
+        for item in items {
+            let kind = item.get("type").and_then(Value::as_str);
+            let easing = match item.get("easing") {
+                None => Some("Linear".to_string()),
+                Some(e) => e.as_str().filter(|e| EASINGS.contains(e)).map(String::from),
+            };
+            let Some(easing) = easing else { return AnimList::Advanced(describe(v)) };
+            let duration = item.get("duration").and_then(Value::as_f64).map(|d| d as f32);
+            let target = match kind {
+                Some("Spiral") | Some("ReverseSpiral") => {
+                    if set.spiral.on {
+                        return AnimList::Advanced(describe(v));
+                    }
+                    set.reverse = kind == Some("ReverseSpiral");
+                    &mut set.spiral
+                }
+                Some("Fade") => {
+                    if set.fade.on {
+                        return AnimList::Advanced(describe(v));
+                    }
+                    &mut set.fade
+                }
+                _ => return AnimList::Advanced(describe(v)),
+            };
+            target.on = true;
+            target.easing = easing;
+            if let Some(d) = duration {
+                target.duration = d;
+            }
+        }
+        AnimList::Simple(set)
+    }
+
+    fn to_yaml(&self) -> Option<NewValue> {
+        let AnimList::Simple(set) = self else { return None };
+        let mut lines = Vec::new();
+        let mut push = |kind: &str, a: &Anim| {
+            lines.push(format!("- type: {kind}"));
+            lines.push(format!("  duration: {}", fmt_num(a.duration.round())));
+            lines.push(format!("  easing: {}", a.easing));
+        };
+        if set.spiral.on {
+            push(if set.reverse { "ReverseSpiral" } else { "Spiral" }, &set.spiral);
+        }
+        if set.fade.on {
+            push("Fade", &set.fade);
+        }
+        Some(if lines.is_empty() { NewValue::Inline("[]".into()) } else { NewValue::Block(lines) })
     }
 }
 
@@ -117,6 +265,9 @@ pub struct Settings {
     pub active_color: ColorSetting,
     pub inactive_color: ColorSetting,
     pub animations_enabled: bool,
+    pub animations_active: AnimList,
+    pub animations_inactive: AnimList,
+    pub animations_fps: i32,
     pub effects_enabled: bool,
 }
 
@@ -152,12 +303,13 @@ impl Settings {
             },
         };
 
-        let enabled = |section: &str| {
-            g(section)
-                .and_then(|s| s.get("enabled"))
-                .map(as_bool)
-                .unwrap_or(false)
+        // Like tacky-borders: a missing section means off, but a section without
+        // `enabled:` means on.
+        let enabled = |section: &str| match g(section) {
+            None | Some(Value::Null) => false,
+            Some(s) => s.get("enabled").map(as_bool).unwrap_or(true),
         };
+        let anim = |k: &str| g("animations").and_then(|a| a.get(k));
 
         Ok(Settings {
             border_width,
@@ -166,6 +318,9 @@ impl Settings {
             active_color: ColorSetting::from_yaml(g("active_color")),
             inactive_color: ColorSetting::from_yaml(g("inactive_color")),
             animations_enabled: enabled("animations"),
+            animations_active: AnimList::from_yaml(anim("active")),
+            animations_inactive: AnimList::from_yaml(anim("inactive")),
+            animations_fps: anim("fps").and_then(Value::as_i64).unwrap_or(60) as i32,
             effects_enabled: enabled("effects"),
         })
     }
@@ -207,6 +362,22 @@ impl Settings {
             if now != before {
                 doc.set(&["global", key, "enabled"], NewValue::Inline(yaml_bool(now)));
             }
+        }
+        for (key, now, before) in [
+            ("active", &self.animations_active, &original.animations_active),
+            ("inactive", &self.animations_inactive, &original.animations_inactive),
+        ] {
+            if now != before {
+                if let Some(v) = now.to_yaml() {
+                    doc.set(&["global", "animations", key], v);
+                }
+            }
+        }
+        if self.animations_fps != original.animations_fps {
+            doc.set(
+                &["global", "animations", "fps"],
+                NewValue::Inline(self.animations_fps.to_string()),
+            );
         }
         doc.to_text()
     }
@@ -348,8 +519,76 @@ mod tests {
     }
 
     #[test]
+    fn reads_default_animations() {
+        let s = Settings::from_yaml(DEFAULT).unwrap();
+        let AnimList::Simple(a) = &s.animations_active else { panic!() };
+        assert!(a.spiral.on && a.reverse && a.fade.on);
+        assert_eq!(a.spiral.duration, 1800.0);
+        assert_eq!(a.fade.easing, "EaseInOutQuad");
+        let AnimList::Simple(i) = &s.animations_inactive else { panic!() };
+        assert!(i.spiral.on && !i.reverse);
+        assert_eq!(s.animations_fps, 60);
+    }
+
+    #[test]
+    fn animations_roundtrip() {
+        let before = Settings::from_yaml(DEFAULT).unwrap();
+        let mut after = before.clone();
+        after.animations_enabled = true;
+        after.animations_fps = 144;
+        if let AnimList::Simple(a) = &mut after.animations_active {
+            a.spiral.on = false;
+            a.fade.duration = 350.0;
+            a.fade.easing = "EaseOutBack".into();
+        }
+        if let AnimList::Simple(a) = &mut after.animations_inactive {
+            a.spiral.on = false;
+            a.fade.on = false;
+        }
+        let text = after.apply_changes(&before, DEFAULT);
+        assert_eq!(Settings::from_yaml(&text).unwrap(), after);
+        assert!(text.contains("    inactive: []\n"));
+        assert!(text.contains("    active:\n      - type: Fade\n        duration: 350\n        easing: EaseOutBack\n"));
+    }
+
+    #[test]
+    fn section_without_enabled_is_on() {
+        let s = Settings::from_yaml("global:\n  animations:\n    fps: 30\n").unwrap();
+        assert!(s.animations_enabled);
+        assert!(!s.effects_enabled);
+    }
+
+    #[test]
+    fn custom_bezier_animation_is_left_alone() {
+        let yaml = "global:\n  animations:\n    active:\n      - type: Fade\n        easing: [0.1, 0.2, 0.3, 0.4]\n";
+        let s = Settings::from_yaml(yaml).unwrap();
+        assert!(matches!(s.animations_active, AnimList::Advanced(_)));
+    }
+
+    #[test]
+    fn theme_aware_roundtrip() {
+        let yaml = "global:\n  active_color:\n    dark: \"#fff\"\n    light: accent\n  border_width: 2\n";
+        let before = Settings::from_yaml(yaml).unwrap();
+        assert_eq!(
+            before.active_color,
+            ColorSetting::ThemeAware {
+                dark: Box::new(ColorSetting::Solid([255, 255, 255, 255])),
+                light: Box::new(ColorSetting::Accent)
+            }
+        );
+        let mut after = before.clone();
+        after.active_color = ColorSetting::ThemeAware {
+            dark: Box::new(ColorSetting::Gradient { from: [1, 2, 3, 255], to: [4, 5, 6, 255], angle: 90.0 }),
+            light: Box::new(ColorSetting::Solid([0, 0, 0, 255])),
+        };
+        let text = after.apply_changes(&before, yaml);
+        assert_eq!(Settings::from_yaml(&text).unwrap(), after);
+        assert!(text.contains("  active_color:\n    dark:\n      colors: [\"#010203\", \"#040506\"]\n      direction: 90deg\n    light: \"#000000\"\n  border_width: 2\n"));
+    }
+
+    #[test]
     fn advanced_color_is_left_alone() {
-        let yaml = "global:\n  active_color:\n    dark: \"#fff\"\n    light: \"#000\"\n  border_width: 2\n";
+        let yaml = "global:\n  active_color:\n    dark: \"#fff\"\n    light:\n      colors: [\"#000\", \"#111\", \"#222\"]\n      direction: 0deg\n  border_width: 2\n";
         let before = Settings::from_yaml(yaml).unwrap();
         assert!(matches!(before.active_color, ColorSetting::Advanced(_)));
         let mut after = before.clone();
