@@ -22,7 +22,9 @@ tacky-borders reloads the config on its own (`watch_config_changes: True`), so c
 ## Usage
 
 1. Install and run tacky-borders once, so it creates `%USERPROFILE%\.config\tacky-borders\config.yaml`.
-2. **[Download tacky-borders-settings.exe](https://github.com/vibe-pEpE/tacky-borders-settings/raw/main/download/tacky-borders-settings.exe)** and run it. It needs no installation.
+2. Download **tacky-borders-settings.exe** from the **[Releases page](https://github.com/vibe-pEpE/tacky-borders-settings/releases)** and run it. It needs no installation.
+
+   Windows may show a SmartScreen warning because the app isn't signed yet. Click **More info → Run anyway**.
 
 ## Building
 
